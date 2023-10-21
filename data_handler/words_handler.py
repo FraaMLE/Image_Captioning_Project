@@ -78,7 +78,7 @@ class Words_Handler:
         for word in occurrences.keys():
             if occurrences[word] > self.min_frequency:
                 self.s2i[word] = idx
-                idx += idx
+                idx += 1
         self.i2s = self.invert_dict(self.s2i)
 
     def text2numbers(self, text: str) -> List[int]:
@@ -99,11 +99,12 @@ if __name__ == "__main__":
     handler = Words_Handler(min_frequency=5,
                             captions_path=r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\captions.txt")
     handler.look_up_dictionary_builder()
-    print(len(handler.s2i))
-    print(len(handler.i2s))
-    num = handler.text2numbers(handler.captions[0])
-    print(num)
-    print(handler.numbers2text(num))
-    print(handler.captions[0])
+    print(f'The dictionary consist of {len(handler.s2i)} elements')
+    print("Given the example 'This is a test example .' ")
+    num = handler.text2numbers("This is a test example .")
+    print('The handler will translate it numbers based on its inner vocubulary:\n ', num)
+    print(f'which mapped back to words is {handler.numbers2text(num)}')
     handler.plot_word_histogram()
+
+
 
