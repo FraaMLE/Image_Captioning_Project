@@ -13,6 +13,7 @@ class Words_Handler:
         self.min_frequency = min_frequency
         self.i2s = None
         self.s2i = {"<PAD>": 0, "<SOS>": 1, "<EOS>": 2, "UNK": 3}
+        self.look_up_dictionary_builder()
 
     @staticmethod
     def tokenizer_text(text: str) -> List[str]:
@@ -98,7 +99,6 @@ class Words_Handler:
 if __name__ == "__main__":
     handler = Words_Handler(min_frequency=5,
                             captions_path=r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\captions.txt")
-    handler.look_up_dictionary_builder()
     print(f'The dictionary consist of {len(handler.s2i)} elements')
     print("Given the example 'This is a test example .' ")
     num = handler.text2numbers("This is a test example .")
