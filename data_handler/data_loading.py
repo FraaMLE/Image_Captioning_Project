@@ -39,7 +39,7 @@ class Data_set(Dataset):
 
 
 class Customized_collate:
-    def __init__(self, pad_idx = 0):
+    def __init__(self, pad_idx=0):
         self.pad_idx = pad_idx
 
     def __call__(self, batch):
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     parent_dir_path = r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\images"
     # Step 1: Define image transforms (adjust to your needs)
     image_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((300, 300)),
         transforms.ToTensor(),
     ])
     custom_dataset = Data_set(parent_dir_path = parent_dir_path, captions_files_path = captions_files_path, transform=image_transform)

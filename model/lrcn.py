@@ -6,135 +6,127 @@ import torchvision.transforms as transforms
 from data_handler.words_handler import Words_Handler
 from data_handler.data_loading import ConcatenateFeaturesAndSequences, Data_set, Customized_collate
 from torch.utils.data import DataLoader, Dataset
+from convolutional_autoencoder import ConvAutoencoder
 
 
-class Lrcn(nn.Module):
-    def __init__(self, embed_size: int, path_captions: str, min_frequency: int):
-        super(Lrcn, self).__init__()
-        self.vocab = Words_Handler(min_frequency=min_frequency,
-                                   captions_path=path_captions)
-        # ENCODER: CNN
-        # N x 3 x 299 x 299, so ensure your images are sized accordingly.
-        self.inception = models.inception_v3(init_weights=True)
-
-
+class Encoder(nn.Module):
+    def __init__(self, embed_size: int, drop_prob: float, manifold_size=34 * 34 * 60):
+        super(Encoder, self).__init__()
+        self.conv_autoenc = ConvAutoencoder().eval()
+        self.linear_mapper = nn.Sequential(nn.Linear(manifold_size, embed_size * 5),
+                                           nn.Linear(embed_size * 5, embed_size * 3),
+                                           nn.Linear(embed_size * 3, embed_size))
         self.relu = nn.ReLU()
-        self.dropout_01 = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(drop_prob)
 
-        # DECODER: LSTM
-        # vocab_size --> rows ||| embded_size --> columns
-        self.embed = nn.Embedding(len(self.vocab.s2i), embed_size)  # Not pre-trained
-        self.concatenator = ConcatenateFeaturesAndSequences(embed_size)
-        # LSTM_input_size, LSTM_hidden_state_size_01 = embed_size
-        # embed_size_img + embded_size_word = embed_size * 2
+    def forward(self, images):
+        manifold = self.conv_autoenc.manifold(images)
+        reshaped_manifold = manifold.view(images.size(0), -1)
+        features = self.linear_mapper(reshaped_manifold)
+        return self.dropout(self.relu(features))
+
+
+class Decoder(nn.Module):
+    def __init__(self, embed_size: int, h: int, vocab_size: int, drop_prob: float):
+        super(Decoder, self).__init__()
+        self.embed = nn.Embedding(vocab_size, embed_size)
         self.lstm_01 = nn.LSTM(embed_size * 2, embed_size, num_layers=1, batch_first=True)
         self.lstm_02 = nn.LSTM(embed_size * 2, embed_size, num_layers=1, batch_first=True)
-        self.linear = nn.Linear(embed_size, len(self.vocab.s2i))
-        self.dropout_02 = nn.Dropout(0.5)
+        self.linear = nn.Linear(embed_size, vocab_size)
+        self.dropout = nn.Dropout(drop_prob)
+        self.concatenate = ConcatenateFeaturesAndSequences(embed_size)
+        self.embed_size = embed_size
 
-    def forward(self, images, captions):
-        """
-        ENCODER:
-        A batch of images is passed through the CNN that extract the features of the images
-        ---> CNN_output: (N, features_size), where features_size == embed_size
-        Then each features is replicated in order to match the length of the sequence so that the batch
-        of caption can be concatenated in with the images.
-        ---> replicated_CNN_output: (N, L, features_size)
-        The corresponding batch of captures of shape (N, L, 1) is then mapped into the embedding space
-        becoming (N, L, embed_size).
-        Finally, the embeddings and the features are concatenated and passed to the decoder.
-
-        DECODER:
-        The second LSTM takes as input the output of the first one (whose size coincides with the embed_size)
-        concatenated with replicated_CNN_output, and it initializes
-        its h_0 and c_0 with the one output by the last recurrence of the LSTM_1.
-        """
-        features, _ = self.inception(images)
-        features = self.dropout_01(self.relu(features))
-
-        # (N, sequence_length, embed_size)
-        embedded_captions = self.dropout_02(
-            self.embed(captions)
-        )
-        # add concatenation here: (N, sequence_length, embed_size*2)
-        concatenated_input = self.concatenator(features, embedded_captions)
+    def forward(self, features, caption):
+        mapped_words = self.dropout(self.embed(caption))
+        con_01 = self.concatenate(features, mapped_words)
         # lstm_1: (N, L, LSTM_hidden_state_size_01) where LSTM_hidden_state_size_01 == embed_size
-        lstm_1, (h_0_1, c_0_1) = self.lstm_01(concatenated_input)
+        lstm_1, (h_0_1, c_0_1) = self.lstm_01(con_01)
         # lstm_1 concatenated with features: (N, sequence_length, embed_size*2)
-        lstm_1_concatenated = self.concatenator(features, lstm_1)
+        lstm_1_concatenated = self.concatenate(features, lstm_1)
         lstm_2, _ = self.lstm_02(lstm_1_concatenated, (h_0_1, c_0_1))
-
         outputs = self.linear(lstm_2)
         return outputs
 
+
+class Image_captioner(nn.Module):
+    def __init__(self, embed_size, hidden_size, captions_path, drop_prob=0.5):
+        super(Image_captioner, self).__init__()
+        self.vocab = Words_Handler(min_frequency=5, captions_path=captions_path)
+        self.encoder = Encoder(embed_size, drop_prob)
+        self.decoder = Decoder(embed_size, hidden_size, vocab_size=len(self.vocab.s2i), drop_prob=drop_prob)
+
+    def forward(self, images, captions):
+        features = self.encoder(images)
+        outputs = self.decoder(features, captions)
+        return outputs
+
+    def texter(self, x, word, flag=True):
+        if flag:
+            word = torch.IntTensor([word])
+        with torch.no_grad():
+            word = self.decoder.dropout(self.decoder.embed(word))
+            con_01 = torch.cat((x, word), dim=1)
+            lstm_1, (h_0_1, c_0_1) = self.decoder.lstm_01(con_01)
+            lstm_1_concatenated = torch.cat((x, lstm_1), dim=1)
+            lstm_2, _ = self.decoder.lstm_02(lstm_1_concatenated, (h_0_1, c_0_1))
+            outputs = self.decoder.linear(lstm_2)
+            return outputs
+
     def generate_text_capture(self, image, max_length=40):
         text_caption = []
-        sos_tensor = torch.full((image.shape[0], 1), self.vocab.s2i['<SOS>'])
-
         with torch.no_grad():
-            features, _ = self.inception(image)
-            features = self.dropout_01(self.relu(features))
-            states_01 = None
-
-            for _ in range(max_length):
-                if _ == 0:
-                    start_text = self.dropout_02(
-                        self.embed(sos_tensor)
-                    )
-                    concatenation_01 = torch.cat((features, start_text), dim=0)
-                    lstm_1, (h_0_1, c_0_1) = self.lstm_01(concatenation_01)
-                    concatenation_02 = torch.cat((features, lstm_1), dim=0)
-                    lstm_2, _ = self.lstm_02(concatenation_02, (h_0_1, c_0_1))
-                    outputs = self.linear(lstm_2)
+            x = self.encoder(image)
+            for iteration in range(max_length):
+                if iteration == 0:
+                    sos = self.vocab.s2i["<SOS>"]
+                    outputs = self.texter(x, sos)  # [1, 2664] --> [2664], correct?
                     prediction = outputs.argmax(1)
                     text_caption.append(prediction.item())
-                    text = self.dropout_02(
-                        self.embed(start_text)
-                    )
-                    if self.vocab.i2s[prediction.item()] == "<EOS>":
-                        break
+
                 else:
-                    concatenation_01 = torch.cat((features, text), dim=0)
-                    lstm_1, (h_0_1, c_0_1) = self.lstm_01(concatenation_01)
-                    concatenation_02 = torch.cat((features, lstm_1), dim=0)
-                    lstm_2, _ = self.lstm_02(concatenation_02, (h_0_1, c_0_1))
-                    outputs = self.linear(lstm_2)
-                    prediction = outputs.argmax(1)
-                    text_caption.append(prediction.item())
-                    text = embedded_captions = self.dropout_02(
-                        self.embed(text)
-                    )
-                    if self.vocab.i2s[prediction.item()] == "<EOS>":
-                        break
-        return [self.vocab.i2s[idx] for idx in text_caption]
-
-
+                    if text_caption[-1] != self.vocab.s2i["<EOS>"]:
+                        outputs = self.texter(x, text_caption[-1])
+                        prediction = outputs.argmax(1)
+                        text_caption.append(prediction.item())
+                    else:
+                        return text_caption
+        return text_caption
 
 
 if __name__ == "__main__":
-    captions_files_path = r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\captions.txt"
-    parent_dir_path = r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\images"
-    # Step 1: Define image transforms (adjust to your needs)
-    image_transform = transforms.Compose(
-        [
-            transforms.Resize((356, 356)),
-            transforms.RandomCrop((299, 299)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]
-    )
-    custom_dataset = Data_set(parent_dir_path
-                              =parent_dir_path,
-                              captions_files_path=captions_files_path,
-                              transform=image_transform)
-    batch_size = 32  # Adjust this according to your needs
-    data_loader = DataLoader(custom_dataset, batch_size=batch_size, shuffle=True, collate_fn=Customized_collate())
-    model = Lrcn(embed_size=256, path_captions=captions_files_path,
-                 min_frequency=5)
+    batch_size = 3
+    sequence_length = 12
+    channels = 3
+    height = 300
+    width = 300
+    emb = 256
+    batch = torch.empty(batch_size, channels, height, width)
+    cap = torch.LongTensor(batch_size, sequence_length).random_(0, 100)
+    mo = Image_captioner(embed_size=256, hidden_size=256,
+                         captions_path=r"C:\Users\franv\Downloads\Images_Dataset\flickr8k\captions.txt",
+                         drop_prob=0.5)
+    print(mo(batch, cap).shape)  # torch.Size([batch_size, sequence_length, vocabulary size])
 
-    for images, captions in data_loader:
-        t = model.generate_text_capture(images)
-        print(t)
-        print(captions.shape)
-        print(type(captions))
-        break
+    # word = torch.LongTensor(1).random_(0,2260)
+    # shape = (3, 300, 300)
+    # single_image = torch.rand(*shape)
+    # em = Encoder(embed_size=256, drop_prob=0.5).eval()
+    # ima = em(single_image.unsqueeze(0))
+    # print(ima.shape)
+    # x = torch.randn(256)
+    # pr = mo.texter(ima, word)
+    # print(pr.shape)
+    # print(word.shape)
+    # shape = (1, 3, 300, 300)
+    # single_image = torch.rand(*shape)
+    # proc = mo.encoder(single_image)
+    # print(proc.shape)
+    # idx = mo.vocab.s2i["<SOS>"]
+    # mapped = mo.decoder.embed(torch.LongTensor([idx]))
+    # print(mo.texter(proc, idx).argmax(1)) # tensor([103])
+    # t = mo.generate_text_capture(single_image)
+    # print(t)
+
+    # print(mo.texter(x, word))
+    # print(x.shape)
